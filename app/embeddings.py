@@ -1,12 +1,7 @@
-"""
-Embedding service — uses sentence-transformers locally (no API cost).
-Model: all-MiniLM-L6-v2  (384-dim, ~80MB, fast on CPU)
-"""
+    
 
 import logging
-from functools import lru_cache
-from sentence_transformers import SentenceTransformer
-
+import httpx
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -14,21 +9,28 @@ logger = logging.getLogger(__name__)
 
 class EmbeddingService:
     def __init__(self):
-        logger.info(f"Loading embedding model '{settings.EMBEDDING_MODEL}'…")
-        self._model = SentenceTransformer(settings.EMBEDDING_MODEL)
-        logger.info("Embedding model loaded.")
+        self._client = httpx.Client(
+            headers={
+                "Authorization": f"Bearer {settings.GROQ_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            timeout=30.0,
+        )
+        logger.info("EmbeddingService ready (Groq API, nomic-embed-text-v1_5).")
 
     def embed(self, text: str) -> list[float]:
-        """Embed a single text string."""
-        vector = self._model.encode(text, normalize_embeddings=True)
-        return vector.tolist()
-
-    def embed_batch(self, texts: list[str], batch_size: int = 64) -> list[list[float]]:
-        """Batch embed multiple texts efficiently."""
-        vectors = self._model.encode(
-            texts,
-            batch_size=batch_size,
-            normalize_embeddings=True,
-            show_progress_bar=len(texts) > 100,
+        resp = self._client.post(
+            "https://api.groq.com/openai/v1/embeddings",
+            json={"model": "nomic-embed-text-v1_5", "input": text},
         )
-        return [v.tolist() for v in vectors]
+        resp.raise_for_status()
+        return resp.json()["data"][0]["embedding"]
+
+    def embed_batch(self, texts: list[str], batch_size: int = 20) -> list[list[float]]:
+        all_embeddings = []
+        for i in range(0, len(texts), batch_size):
+            batch = texts[i: i + batch_size]
+            for text in batch:
+                all_embeddings.append(self.embed(text))
+            logger.info(f"Embedded {min(i+batch_size, len(texts))}/{len(texts)} texts...")
+        return all_embeddings

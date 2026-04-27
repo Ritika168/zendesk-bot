@@ -1,0 +1,44 @@
+# render.yaml — Render.com deployment manifest
+# Deploy at: https://dashboard.render.com → New → Blueprint
+# Free tier: 512MB RAM, sleeps after 15min inactivity (upgrade for always-on)
+
+services:
+  - type: web
+    name: zendesk-rag-bot
+    env: python
+    region: oregon
+    plan: free           # Change to "starter" ($7/mo) for always-on
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: ZENDESK_SUBDOMAIN
+        sync: false
+      - key: ZENDESK_EMAIL
+        sync: false
+      - key: ZENDESK_API_TOKEN
+        sync: false
+      - key: ZENDESK_WEBHOOK_SECRET
+        sync: false
+      - key: PINECONE_API_KEY
+        sync: false
+      - key: PINECONE_INDEX_NAME
+        value: zendesk-rag
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_MODEL
+        value: llama3-8b-8192
+      - key: AUTO_POST_TO_ZENDESK
+        value: "false"
+      - key: TOP_K_RESULTS
+        value: "3"
+
+# ── Notes ──────────────────────────────────────────────────────────────────
+# 1. After deploying, set env vars in the Render dashboard under "Environment"
+# 2. Run initial ingestion via: POST /ingest/all  (one-time setup)
+# 3. Schedule /ingest/all as a Render Cron Job (daily at midnight) to keep fresh:
+#
+#   cron:
+#     - name: daily-ingest
+#       schedule: "0 0 * * *"
+#       command: python scripts/ingest.py --mode all

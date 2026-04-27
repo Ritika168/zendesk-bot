@@ -1,0 +1,24 @@
+# Zendesk RAG Bot — Python dependencies
+# Tested on Python 3.11+
+
+# Web framework
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+
+# HTTP client (async)
+httpx==0.27.0
+
+# Configuration
+pydantic-settings==2.2.1
+
+# Embeddings (runs locally, no API cost)
+sentence-transformers==3.0.0
+
+# Vector database
+pinecone-client==3.2.2
+
+# LLM — Groq (free tier, LLaMA 3)
+groq==0.8.0
+
+# Utilities
+python-multipart==0.0.9   # For FastAPI form support

@@ -23,9 +23,12 @@ class Settings(BaseSettings):
     GROQ_API_KEY: str
     GROQ_MODEL: str = "llama3-8b-8192"          # Free, fast, capable
 
-    # ── Embedding model (local, no API cost) ─────────────────────────────────
+    # nomic-embed-text-v1_5 = 768-dim (via Groq, free, no local RAM)
+    EMBEDDING_DIM: int = 768
+    
+  '''  # ── Embedding model (local, no API cost) ─────────────────────────────────
     EMBEDDING_MODEL: str = "all-MiniLM-L6-v2"   # 384-dim, fast, free
-    EMBEDDING_DIM: int = 384
+    EMBEDDING_DIM: int = 384 '''
 
     # ── App behaviour ─────────────────────────────────────────────────────────
     AUTO_POST_TO_ZENDESK: bool = False           # Set True to auto-post notes

@@ -1,0 +1,27 @@
+[
+  {
+    "id": "sop-001",
+    "title": "Password Reset Process",
+    "body": "If a customer cannot log in or has forgotten their password, follow these steps:\n1. Ask the customer to visit the login page and click 'Forgot Password'.\n2. Instruct them to enter their registered email address.\n3. Tell them to check their inbox (and spam/junk folder) for a reset email.\n4. The reset link expires in 30 minutes — if expired, repeat the process.\n5. If the email never arrives, verify the email address on file in the admin panel.\n6. If the account email is wrong, escalate to Tier 2 support for manual update.\n7. Never share or reset passwords on behalf of the customer directly."
+  },
+  {
+    "id": "sop-002",
+    "title": "Refund and Cancellation Policy",
+    "body": "Refund requests must follow this procedure:\n1. Verify the customer's order ID and purchase date in the billing system.\n2. Refunds are eligible within 30 days of purchase only.\n3. Digital products are non-refundable after download unless the product is defective.\n4. For eligible refunds, process via the billing portal under 'Refund Request'.\n5. Inform the customer that refunds take 5-7 business days to appear.\n6. If the request is outside 30 days, offer a store credit as an alternative.\n7. Escalate disputes over $500 to the billing manager for approval.\n8. Always document the refund reason in the ticket before closing."
+  },
+  {
+    "id": "sop-003",
+    "title": "Account Locked or Suspended",
+    "body": "When a customer reports their account is locked or suspended:\n1. Check the account status in the admin panel using their email or user ID.\n2. If locked due to too many failed login attempts, unlock via Admin > Users > Unlock Account.\n3. If suspended due to payment failure, direct the customer to update their payment method.\n4. If suspended due to policy violation, do NOT unlock without approval from the compliance team.\n5. Inform the customer of the reason for suspension (general terms only, not internal notes).\n6. For false suspensions, escalate immediately to a senior agent with full documentation.\n7. Log all account unlock actions in the ticket with timestamp and reason."
+  },
+  {
+    "id": "sop-004",
+    "title": "Technical Issue or Bug Report",
+    "body": "When a customer reports a technical issue or bug:\n1. Ask the customer to describe the issue in detail — what they were doing, what happened, and what they expected.\n2. Request a screenshot or screen recording if possible.\n3. Ask which browser, device, and operating system they are using.\n4. Try to reproduce the issue in a test environment.\n5. Check the known issues board for existing reports of the same problem.\n6. If a known issue, inform the customer it is being worked on and provide an ETA if available.\n7. If a new issue, log it in the bug tracking system with all customer details and steps to reproduce.\n8. Follow up with the customer once a fix is deployed.\n9. Never promise a fix date unless confirmed by the engineering team."
+  },
+  {
+    "id": "sop-005",
+    "title": "Billing and Invoice Queries",
+    "body": "When a customer has a billing question or requests an invoice:\n1. Verify the customer identity by confirming their registered email and last 4 digits of payment method.\n2. For invoice requests, go to Billing > Invoices and download the relevant invoice as PDF.\n3. Send the invoice to the customer's registered email only — never to a third party without written consent.\n4. For overcharge complaints, compare the billed amount with the plan details in the system.\n5. If an overcharge is confirmed, process a partial refund for the difference.\n6. If the customer claims non-receipt of invoice, check spam settings and resend.\n7. For VAT or tax queries, direct the customer to the finance team via internal escalation.\n8. Always confirm billing changes in writing via email to the customer."
+  }
+]

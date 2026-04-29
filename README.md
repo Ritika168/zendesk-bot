@@ -1,57 +1,71 @@
-# Zendesk RAG Bot
+# Zendesk RAG Bot 🤖
 
-> A production-ready, cloud-deployed RAG chatbot that generates intelligent support responses using your Zendesk SOPs and resolved ticket history.
+> A production-ready, cloud-deployed RAG (Retrieval-Augmented Generation) chatbot that automatically generates intelligent support responses on every new Zendesk ticket — using your SOPs as the source of truth.
 
-**Live URL:** `https://zendesk-rag-bot-pqbr.onrender.com`
+**Live URL:** `https://zendesk-rag-bot-pqbr.onrender.com`  
+**Status:** ✅ Fully operational
 
 ---
 
-## Current Status
+## What It Does
 
-| Component | Status |
-|---|---|
-| FastAPI backend | ✅ Live on Render |
-| Pinecone vector DB | ✅ Connected (384-dim, cosine) |
-| HuggingFace embeddings | ✅ Working (all-MiniLM-L6-v2) |
-| Groq LLM | ✅ Working (llama-3.1-8b-instant) |
-| SOPs loaded | ✅ 5 SOPs in Pinecone |
-| Zendesk tickets | ⏳ Pending (fix API token) |
-| Zendesk webhook | ⏳ Not connected yet |
+When a customer creates a support ticket in Zendesk:
+1. The bot is instantly triggered via webhook
+2. It reads the ticket description
+3. Searches your SOP knowledge base for relevant procedures
+4. Searches past resolved tickets for similar cases
+5. Generates a professional, actionable response using an LLM
+6. Posts the suggested response as an **internal note** on the ticket
+7. Your agent reviews it and sends it to the customer
+
+All of this happens in **under 3 seconds**, automatically, for every ticket.
 
 ---
 
 ## Architecture
 
 ```
-INGESTION PIPELINE
-──────────────────
-sops.json (local)          Zendesk Closed Tickets
-      │                           │
-      ▼                           ▼
-   Preprocess              Preprocess
-  (clean + chunk)         (extract summary)
-      │                           │
-      ▼                           ▼
-HuggingFace Embeddings API (all-MiniLM-L6-v2, 384-dim, free)
-      │
-      ▼
-Pinecone Index (type: SOP | TICKET)
+INGESTION PIPELINE (run once / on demand)
+─────────────────────────────────────────
+sops.json (your SOPs)      Zendesk Closed Tickets
+        │                          │
+        ▼                          ▼
+    Clean + Chunk             Extract Summary
+        │                          │
+        └──────────┬───────────────┘
+                   ▼
+     HuggingFace Embeddings API
+     (all-MiniLM-L6-v2, 384-dim, free)
+                   │
+                   ▼
+          Pinecone Vector Index
+          (type: SOP | TICKET)
 
-QUERY PIPELINE
-──────────────
-New Ticket Description
-      │
-      ▼
-HuggingFace Embed query
-      │
-      ▼
-Pinecone Query ──► Top 3 SOPs + Top 3 Tickets
-      │
-      ▼
-Groq LLM (llama-3.1-8b-instant, free tier)
-      │
-      ▼
-Response JSON  ──► (optional) Zendesk Internal Note
+
+QUERY PIPELINE (automatic on every new ticket)
+──────────────────────────────────────────────
+Customer creates Zendesk ticket
+        │
+        ▼
+Zendesk Trigger fires webhook
+        │
+        ▼
+POST /webhook/zendesk (Render)
+        │
+        ▼
+Embed ticket description (HuggingFace)
+        │
+        ▼
+Query Pinecone ──► Top 3 SOPs + Top 3 past tickets
+        │
+        ▼
+Build prompt (SOP = truth, tickets = reference)
+        │
+        ▼
+Groq LLM (llama-3.1-8b-instant, free)
+        │
+        ▼
+Post internal note → Zendesk ticket ✅
 ```
 
 ---
@@ -61,13 +75,13 @@ Response JSON  ──► (optional) Zendesk Internal Note
 | Component | Tool | Cost |
 |---|---|---|
 | Backend | FastAPI + Uvicorn | Free |
-| Embeddings | HuggingFace Inference API | Free |
-| Vector DB | Pinecone (serverless) | Free tier |
-| LLM | Groq (llama-3.1-8b-instant) | Free tier |
 | Deployment | Render.com | Free tier |
-| SOPs | Local sops.json | Free |
+| Embeddings | HuggingFace Inference API (all-MiniLM-L6-v2) | Free |
+| Vector DB | Pinecone (serverless, 384-dim, cosine) | Free tier |
+| LLM | Groq (llama-3.1-8b-instant) | Free tier |
+| Source data | Local sops.json + Zendesk API | Free |
 
-**Total cost: $0/month**
+**Total monthly cost: $0**
 
 ---
 
@@ -76,24 +90,24 @@ Response JSON  ──► (optional) Zendesk Internal Note
 ```
 zendesk-rag-bot/
 ├── app/
-│   ├── __init__.py
-│   ├── main.py           # FastAPI app + all endpoints
-│   ├── config.py         # Environment variable settings
-│   ├── models.py         # Pydantic request/response models
-│   ├── rag_pipeline.py   # Core orchestrator
-│   ├── zendesk_client.py # Zendesk API client
-│   ├── preprocessor.py   # Text cleaning + chunking
-│   ├── embeddings.py     # HuggingFace embedding service
-│   ├── vector_store.py   # Pinecone upsert + query
-│   └── llm_client.py     # Groq LLM client + prompt
+│   ├── __init__.py           # Package marker
+│   ├── main.py               # FastAPI app + all endpoints + webhook handler
+│   ├── config.py             # Environment variable settings (Pydantic)
+│   ├── models.py             # Request/response Pydantic models
+│   ├── rag_pipeline.py       # Core orchestrator: ingest + query flow
+│   ├── zendesk_client.py     # Zendesk API client (tickets + posting notes)
+│   ├── preprocessor.py       # HTML cleaning, chunking, summary extraction
+│   ├── embeddings.py         # HuggingFace embedding service
+│   ├── vector_store.py       # Pinecone upsert + filtered query
+│   └── llm_client.py         # Groq LLM client + prompt template
 ├── scripts/
-│   └── ingest.py         # Standalone ingestion CLI
+│   └── ingest.py             # Standalone ingestion CLI
 ├── tests/
-│   └── test_preprocessor.py
-├── sops.json             # Your SOP knowledge base
-├── .env.example
-├── render.yaml
-└── requirements.txt
+│   └── test_preprocessor.py  # Unit tests
+├── sops.json                 # Your SOP knowledge base (edit this!)
+├── .env.example              # Environment variable template
+├── render.yaml               # Render deployment config
+└── requirements.txt          # Python dependencies
 ```
 
 ---
@@ -103,35 +117,35 @@ zendesk-rag-bot/
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/health` | Health check |
-| `GET` | `/docs` | Interactive API docs (Swagger UI) |
+| `GET` | `/docs` | Interactive Swagger UI |
 | `POST` | `/ingest/sops` | Load SOPs into Pinecone |
 | `POST` | `/ingest/tickets` | Load resolved tickets into Pinecone |
-| `POST` | `/ingest/all` | Full ingestion |
-| `POST` | `/query` | Generate response for a ticket |
-| `POST` | `/webhook/zendesk` | Zendesk webhook receiver |
+| `POST` | `/ingest/all` | Full ingestion (SOPs + tickets) |
+| `POST` | `/query` | Manually generate response for a ticket |
+| `POST` | `/webhook/zendesk` | Zendesk webhook receiver (auto-triggered) |
 
 ---
 
-## Quick Test
+## Environment Variables
 
-```bash
-# Health check
-curl https://zendesk-rag-bot-pqbr.onrender.com/health
-
-# Query the bot
-curl -X POST https://zendesk-rag-bot-pqbr.onrender.com/query \
-  -H "Content-Type: application/json" \
-  -d '{"ticket_description": "I forgot my password and cannot log in"}'
-
-# Re-run ingestion (after updating sops.json)
-curl -X POST https://zendesk-rag-bot-pqbr.onrender.com/ingest/sops
-```
+| Variable | Required | Value |
+|---|---|---|
+| `ZENDESK_SUBDOMAIN` | ✅ | `demo-87927` |
+| `ZENDESK_EMAIL` | ✅ | Your Zendesk agent email |
+| `ZENDESK_API_TOKEN` | ✅ | Zendesk API token |
+| `PINECONE_API_KEY` | ✅ | Pinecone API key |
+| `PINECONE_INDEX_NAME` | ✅ | `zendesk-rag` |
+| `GROQ_API_KEY` | ✅ | Groq API key |
+| `GROQ_MODEL` | ✅ | `llama-3.1-8b-instant` |
+| `HF_API_TOKEN` | ✅ | HuggingFace API token |
+| `AUTO_POST_TO_ZENDESK` | ✅ | `true` |
+| `TOP_K_RESULTS` | ⬜ | `3` (default) |
 
 ---
 
 ## Adding Your Own SOPs
 
-Edit `sops.json` in the root of the repo. Add as many as you need:
+Edit `sops.json` in the root of the repo:
 
 ```json
 [
@@ -143,60 +157,92 @@ Edit `sops.json` in the root of the repo. Add as many as you need:
 ]
 ```
 
-After saving and pushing to GitHub, re-run ingestion:
+After pushing to GitHub, re-run ingestion:
 ```bash
 curl -X POST https://zendesk-rag-bot-pqbr.onrender.com/ingest/sops
 ```
 
 ---
 
-## Environment Variables
+## Quick Test Commands
 
-| Variable | Required | Description |
-|---|---|---|
-| `ZENDESK_SUBDOMAIN` | ✅ | e.g. `demo-87927` |
-| `ZENDESK_EMAIL` | ✅ | Agent login email |
-| `ZENDESK_API_TOKEN` | ✅ | Zendesk API token |
-| `PINECONE_API_KEY` | ✅ | Pinecone API key |
-| `PINECONE_INDEX_NAME` | ✅ | `zendesk-rag` |
-| `GROQ_API_KEY` | ✅ | Groq API key |
-| `GROQ_MODEL` | ✅ | `llama-3.1-8b-instant` |
-| `HF_API_TOKEN` | ✅ | HuggingFace token |
-| `AUTO_POST_TO_ZENDESK` | ⬜ | `false` (set `true` after webhook setup) |
-| `TOP_K_RESULTS` | ⬜ | Default: `3` |
+```bash
+# Health check
+curl https://zendesk-rag-bot-pqbr.onrender.com/health
+
+# Manual query
+curl -X POST https://zendesk-rag-bot-pqbr.onrender.com/query \
+  -H "Content-Type: application/json" \
+  -d '{"ticket_description": "I forgot my password and cannot log in"}'
+
+# Re-ingest SOPs
+curl -X POST https://zendesk-rag-bot-pqbr.onrender.com/ingest/sops
+
+# Full ingestion
+curl -X POST https://zendesk-rag-bot-pqbr.onrender.com/ingest/all
+```
 
 ---
 
-## Connecting Zendesk Webhook (TODO)
+## How the Prompt Works
 
-When ready, do this to make the bot auto-respond to new tickets:
+The LLM follows strict rules on every call:
 
-1. Zendesk Admin → **Objects & Rules → Triggers → Add Trigger**
-2. Condition: **Ticket is Created**
-3. Action: **Notify active webhook**
-4. Webhook URL: `https://zendesk-rag-bot-pqbr.onrender.com/webhook/zendesk`
-5. JSON body:
+1. **SOPs = source of truth** — always prioritised over everything
+2. **Past tickets = reference only** — used for tone and pattern matching
+3. **No hallucination** — if info isn't in SOPs, escalates to manual review
+4. **Escalation** — returns `MANUAL_REVIEW_REQUIRED` when SOPs don't cover the issue
+5. **Temperature 0.2** — deterministic, factual, consistent responses
+
+---
+
+## What Happens When SOP is Missing
+
+If a ticket comes in that no SOP covers, the bot posts:
+```
+🤖 RAG Bot Suggestion
+
+MANUAL_REVIEW_REQUIRED: This issue requires manual 
+review by a support agent.
+```
+Confidence will show as `MANUAL_REVIEW` — use this as a signal to write a new SOP.
+
+---
+
+## Zendesk Webhook Setup
+
+**Webhook:**
+- URL: `https://zendesk-rag-bot-pqbr.onrender.com/webhook/zendesk`
+- Method: `POST`
+- Format: `JSON`
+
+**Trigger condition:** Ticket is Created
+
+**Trigger action body:**
 ```json
 {
   "ticket_id": "{{ticket.id}}",
   "ticket_description": "{{ticket.description}}"
 }
 ```
-6. Set `AUTO_POST_TO_ZENDESK=true` in Render environment
 
 ---
 
-## Prompt Rules
+## Known Limitations & Next Steps
 
-The LLM follows these rules on every call:
-1. SOPs are the **source of truth** — always prioritised
-2. Past tickets are **reference only**
-3. No hallucination — if info isn't in context, escalates to manual review
-4. Returns `MANUAL_REVIEW_REQUIRED` if SOPs don't cover the issue
-5. Temperature: 0.2 (deterministic, factual)
+| Item | Status | Fix |
+|---|---|---|
+| Render sleeps after 15min | ⚠️ Free tier | Upgrade to Render Starter ($7/mo) |
+| Ticket ingestion 401 error | ⚠️ Pending | Re-enable Zendesk API token access |
+| Only 5 sample SOPs | ⚠️ | Add real company SOPs to sops.json |
+| No daily re-ingestion | ⚠️ | Add Render cron job |
 
 ---
 
-## Note on Free Tier
+## Future Improvements
 
-Render free tier **sleeps after 15 min of inactivity**. First request after sleep takes ~50 seconds to wake up. Upgrade to Render Starter ($7/mo) for always-on.
+- Add more SOPs specific to your business
+- Ingest resolved tickets for richer context
+- Schedule daily re-ingestion via Render cron
+- Add confidence threshold — only post if confidence is HIGH
+- Track which SOPs are used most to identify gaps

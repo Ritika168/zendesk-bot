@@ -1,8 +1,4 @@
-"""
-Pydantic models for API request / response payloads.
-"""
-
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, validator
 from typing import Optional
 
 
@@ -16,23 +12,18 @@ class QueryRequest(BaseModel):
 
 
 class TicketWebhookPayload(BaseModel):
-    """
-    Expected shape of Zendesk webhook POST body.
-    Configure your Zendesk webhook trigger to send this JSON:
-
-    {
-      "ticket_id": "{{ticket.id}}",
-      "ticket_description": "{{ticket.description}}"
-    }
-    """
-    ticket_id: int
+    ticket_id: str  # Zendesk sends as string
     ticket_description: str
+
+    @property
+    def ticket_id_int(self) -> int:
+        return int(self.ticket_id)
 
 
 class RetrievedChunk(BaseModel):
     id: str
     score: float
-    type: str          # "SOP" or "TICKET"
+    type: str
     source_id: str
     title: str
     text: str
@@ -43,4 +34,4 @@ class RAGResponse(BaseModel):
     response: str
     retrieved_sops: list[RetrievedChunk]
     retrieved_tickets: list[RetrievedChunk]
-    confidence: str    # "HIGH" | "MEDIUM" | "MANUAL_REVIEW"
+    confidence: str

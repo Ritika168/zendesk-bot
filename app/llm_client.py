@@ -1,34 +1,29 @@
 """
-LLM client — Groq API (free tier, LLaMA 3 8B).
-Groq offers a generous free tier: ~14,400 requests/day at low latency.
-Fallback: switch GROQ_MODEL to "mixtral-8x7b-32768" for longer context.
+LLM client — Groq API (free tier, LLaMA 3.1 8B Instant).
 """
 
 import logging
 from groq import AsyncGroq
-
 from app.config import settings
 
 logger = logging.getLogger(__name__)
-
-# ── Prompt template ───────────────────────────────────────────────────────────
-# Rules are embedded directly in the system prompt so the LLM always sees them.
 
 SYSTEM_PROMPT = """You are a Zendesk support assistant. Your job is to suggest a helpful, accurate response to a customer ticket.
 
 RULES (follow strictly):
 1. SOPs are the PRIMARY source of truth. Always prioritise SOP instructions over anything else.
-2. Past ticket summaries are REFERENCE ONLY — use them to understand how similar issues were handled.
-3. Do NOT hallucinate steps, procedures, or information that is not present in the provided context.
-4. If the SOPs do not cover the issue adequately, reply EXACTLY with:
-   "MANUAL_REVIEW_REQUIRED: This issue requires manual review by a support agent."
-5. Keep your response concise, professional, and actionable.
-6. Use numbered steps when describing a procedure.
-7. Do NOT mention that you are an AI or that you are using a knowledge base.
-8. Address the customer directly (use "you"/"your").
+2. Past ticket summaries are REFERENCE ONLY.
+3. Do NOT hallucinate steps or information not present in the provided context.
+4. If the customer's message is vague or short (e.g. "please help", "not working"), use the ticket SUBJECT and any context clues to infer the issue and respond based on the most relevant SOP.
+5. If the SOPs do not cover the issue at all, reply EXACTLY with: "MANUAL_REVIEW_REQUIRED: This issue requires manual review by a support agent."
+6. Keep responses concise, professional, and actionable.
+7. Use numbered steps when describing a procedure.
+8. Do NOT mention that you are an AI or that you are using a knowledge base.
+9. Address the customer directly using "you"/"your".
+10. Always sign off as "Zendesk Support".
 """
 
-RESPONSE_TEMPLATE = """## Customer Issue
+RESPONSE_TEMPLATE = """## Customer Ticket
 {ticket_description}
 
 ---
@@ -43,7 +38,7 @@ RESPONSE_TEMPLATE = """## Customer Issue
 
 ---
 
-Based on the SOPs above, draft a support response to the customer issue. If the SOPs do not contain enough information, output MANUAL_REVIEW_REQUIRED."""
+Based on the ticket subject and description, identify the customer's core issue and draft a helpful support response using the SOPs above. If the description is vague, infer the issue from the subject line and respond accordingly."""
 
 
 class LLMClient:
@@ -56,13 +51,8 @@ class LLMClient:
         sop_chunks: list[dict],
         ticket_chunks: list[dict],
     ) -> tuple[str, str]:
-        """
-        Generate a response using Groq.
-        Returns (response_text, confidence_level).
-        confidence: "HIGH" | "MEDIUM" | "MANUAL_REVIEW"
-        """
-        sop_context = self._format_chunks(sop_chunks, "SOP") or "No relevant SOPs found."
-        ticket_context = self._format_chunks(ticket_chunks, "TICKET") or "No similar past tickets found."
+        sop_context = self._format_chunks(sop_chunks) or "No relevant SOPs found."
+        ticket_context = self._format_chunks(ticket_chunks) or "No similar past tickets found."
 
         user_content = RESPONSE_TEMPLATE.format(
             ticket_description=ticket_description,
@@ -70,14 +60,14 @@ class LLMClient:
             ticket_context=ticket_context,
         )
 
-        logger.info(f"Sending prompt to Groq ({settings.GROQ_MODEL})…")
+        logger.info(f"Sending prompt to Groq ({settings.GROQ_MODEL})...")
         response = await self._client.chat.completions.create(
             model=settings.GROQ_MODEL,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_content},
             ],
-            temperature=0.2,    # Low temp → deterministic, factual
+            temperature=0.2,
             max_tokens=600,
         )
 
@@ -86,12 +76,12 @@ class LLMClient:
         return text, confidence
 
     @staticmethod
-    def _format_chunks(chunks: list[dict], label: str) -> str:
+    def _format_chunks(chunks: list[dict]) -> str:
         if not chunks:
             return ""
         parts = []
         for i, c in enumerate(chunks, 1):
-            parts.append(f"[{label} {i}] {c['title']}\n{c['text']}")
+            parts.append(f"[{c['type']} {i}] {c['title']}\n{c['text']}")
         return "\n\n".join(parts)
 
     @staticmethod
@@ -100,6 +90,5 @@ class LLMClient:
             return "MANUAL_REVIEW"
         if not sop_chunks:
             return "MEDIUM"
-        # High confidence when strong SOP matches exist (score > 0.75)
         top_score = max((c.get("score", 0) for c in sop_chunks), default=0)
         return "HIGH" if top_score >= 0.75 else "MEDIUM"

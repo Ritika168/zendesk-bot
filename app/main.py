@@ -112,3 +112,25 @@ async def zendesk_webhook(request: Request):
 async def global_exception_handler(request: Request, exc: Exception):
     logger.error(f"Unhandled error: {exc}", exc_info=True)
     return JSONResponse(status_code=500, content={"detail": "Internal server error"})
+    
+@app.post("/webhook/ticket-closed")
+async def ticket_closed_webhook(request: Request):
+    raw_body = await request.body()
+    data = json.loads(raw_body)
+    ticket_id = data["ticket_id"]
+
+    # Fetch full ticket + all comments from Zendesk
+    comments = await rag.zendesk_client.get_ticket_comments(int(ticket_id))
+
+    # Generate summary using LLM
+    summary = await rag.summarise_closed_ticket(
+        ticket_id=ticket_id,
+        subject=data["subject"],
+        description=data["description"],
+        comments=comments,
+    )
+
+    # Embed and store in Pinecone as type: TICKET
+    await rag.store_ticket_summary(ticket_id, summary)
+
+    return {"status": "summary stored", "ticket_id": ticket_id}

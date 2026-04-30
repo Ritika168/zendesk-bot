@@ -22,6 +22,16 @@ RULES (follow strictly):
 9. Address the customer directly using "you"/"your".
 10. Always sign off as "Zendesk Support".
 """
+SUMMARY_PROMPT = """You are a support knowledge base builder.
+Given a resolved support ticket, generate a concise summary with exactly these sections:
+
+PROBLEM: One sentence describing what the customer reported.
+ACTIONS: Bullet points of key steps the agent took.
+RESOLUTION: One sentence describing how it was resolved.
+CATEGORY: One of: billing, authentication, technical, account, refund, other
+TAGS: 3-5 keywords (comma separated)
+
+Be factual. Only include information present in the ticket."""
 
 RESPONSE_TEMPLATE = """## Customer Ticket
 {ticket_description}

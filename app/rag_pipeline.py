@@ -153,3 +153,17 @@ class RAGPipeline:
             retrieved_tickets=[RetrievedChunk(**h) for h in ticket_hits],
             confidence=confidence,
         ).model_dump()
+
+    async def generate_response(self, ticket_description, ticket_id=None):
+    # Detect category from description
+    category = await self.llm.classify_ticket(ticket_description)
+
+    # Query SOPs (no filter — all SOPs relevant)
+    sop_hits = self.vector_store.query(embedding, filter_type="SOP")
+
+    # Query tickets filtered by category (more relevant matches)
+    ticket_hits = self.vector_store.query(
+        embedding,
+        filter_type="TICKET",
+        filter_category=category,  # NEW
+    )

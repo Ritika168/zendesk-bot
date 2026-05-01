@@ -17,14 +17,13 @@ class ZendeskClient:
             auth=(f"{settings.ZENDESK_EMAIL}/token", settings.ZENDESK_API_TOKEN),
             headers={"Content-Type": "application/json"},
             timeout=30.0,
-            follow_redirects=True,  # follow any redirects automatically
+            follow_redirects=True,
         )
 
+    # ── Help Center / SOPs ────────────────────────────────────────────────────
+
     async def fetch_sop_articles(self, limit: int = 200) -> list[dict]:
-        """
-        Fetch published Help Center articles via the v2 API (auth required).
-        Falls back to empty list if Guide is not enabled.
-        """
+        """Fetch published Help Center articles. Returns empty if Guide not enabled."""
         articles = []
         url = f"{BASE_URL}/help_center/articles.json?per_page=100&sort_by=updated_at"
 
@@ -38,15 +37,14 @@ class ZendeskClient:
                 logger.info(f"Fetched {len(articles)} SOP articles so far...")
             except httpx.HTTPStatusError as e:
                 if e.response.status_code in (302, 401, 403, 404):
-                    logger.warning(
-                        "Help Center not accessible (Guide may not be enabled). "
-                        "Skipping SOP ingestion."
-                    )
+                    logger.warning("Help Center not accessible. Skipping SOP ingestion from Zendesk.")
                     break
                 raise
 
         logger.info(f"Total SOP articles fetched: {len(articles)}")
         return articles[:limit]
+
+    # ── Resolved Tickets ──────────────────────────────────────────────────────
 
     async def fetch_closed_tickets(self, limit: int = 500) -> list[dict]:
         """Fetch solved/closed tickets using the search API."""
@@ -58,12 +56,16 @@ class ZendeskClient:
         )
 
         while url and len(tickets) < limit:
-            resp = await self._client.get(url)
-            resp.raise_for_status()
-            data = resp.json()
-            tickets.extend(data.get("results", []))
-            url = data.get("next_page")
-            logger.info(f"Fetched {len(tickets)} closed tickets so far...")
+            try:
+                resp = await self._client.get(url)
+                resp.raise_for_status()
+                data = resp.json()
+                tickets.extend(data.get("results", []))
+                url = data.get("next_page")
+                logger.info(f"Fetched {len(tickets)} closed tickets so far...")
+            except httpx.HTTPStatusError as e:
+                logger.warning(f"Could not fetch closed tickets: {e}")
+                break
 
         logger.info(f"Total closed tickets fetched: {len(tickets)}")
         return tickets[:limit]
@@ -76,12 +78,14 @@ class ZendeskClient:
         resp.raise_for_status()
         return resp.json().get("comments", [])
 
+    # ── Post back to Zendesk ──────────────────────────────────────────────────
+
     async def post_internal_note(self, ticket_id: int, note: str) -> dict:
-        """Add an internal note to a ticket."""
+        """Add an internal note (visible only to agents) to a ticket."""
         payload = {
             "ticket": {
                 "comment": {
-                    "body": f"🤖 RAG Bot Suggestion\n\n{note}",
+                    "body": note,
                     "public": False,
                 }
             }
@@ -91,6 +95,7 @@ class ZendeskClient:
             json=payload,
         )
         resp.raise_for_status()
+        logger.info(f"Posted internal note to ticket {ticket_id}")
         return resp.json()
 
     async def aclose(self):

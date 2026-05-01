@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field
 from typing import Optional
 
 
@@ -7,13 +7,26 @@ class IngestRequest(BaseModel):
 
 
 class QueryRequest(BaseModel):
-    ticket_description: str = Field(..., min_length=10)
+    ticket_description: str = Field(..., min_length=3)
     ticket_id: Optional[str] = None
 
 
 class TicketWebhookPayload(BaseModel):
-    ticket_id: str  # Zendesk sends as string
+    """Payload for new ticket webhook (ticket created)."""
+    ticket_id: str
     ticket_description: str
+
+    @property
+    def ticket_id_int(self) -> int:
+        return int(self.ticket_id)
+
+
+class ClosedTicketWebhookPayload(BaseModel):
+    """Payload for closed ticket webhook (ticket solved)."""
+    ticket_id: str
+    event: str = "closed"
+    subject: str = ""
+    description: str = ""
 
     @property
     def ticket_id_int(self) -> int:
@@ -35,3 +48,14 @@ class RAGResponse(BaseModel):
     retrieved_sops: list[RetrievedChunk]
     retrieved_tickets: list[RetrievedChunk]
     confidence: str
+
+
+class TicketSummary(BaseModel):
+    ticket_id: str
+    subject: str
+    problem: str
+    actions: str
+    resolution: str
+    category: str
+    tags: str
+    full_summary: str

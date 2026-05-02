@@ -1,13 +1,6 @@
 """
-RAG Pipeline — orchestrates all ingestion and query/response flows.
-
-Two main workflows:
-1. Ingest: SOPs + resolved tickets → Pinecone
-2. Query: new ticket → retrieve → generate → post to Zendesk
-
-New in this version:
-3. Summarise closed ticket → store summary in Pinecone automatically
-4. Category-based filtering for more relevant ticket retrieval
+RAG Pipeline v2.1 — orchestrates all ingestion and query/response flows.
+Fixes: duplicate prevention via deterministic vector IDs.
 """
 
 import json
@@ -20,7 +13,7 @@ from app.preprocessor import preprocess_sop_article, preprocess_ticket
 from app.embeddings import EmbeddingService
 from app.vector_store import VectorStore
 from app.llm_client import LLMClient
-from app.models import RetrievedChunk, RAGResponse, TicketSummary
+from app.models import RetrievedChunk, RAGResponse
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -40,11 +33,7 @@ class RAGPipeline:
     # ─────────────────────────────────────────────────────────────────────────
 
     async def ingest_sops(self, limit: int = 200) -> dict:
-        """
-        Load SOPs from Zendesk Guide if available,
-        otherwise fall back to local sops.json file.
-        Embed and store in Pinecone with type=SOP.
-        """
+        """Load SOPs from Zendesk Guide or local sops.json. Embed and store."""
         articles = await self.zendesk_client.fetch_sop_articles(limit=limit)
 
         if not articles and LOCAL_SOPS_PATH.exists():
@@ -63,13 +52,12 @@ class RAGPipeline:
             logger.info(f"Loaded {len(articles)} SOPs from local file.")
 
         if not articles:
-            logger.warning("No SOPs found from Zendesk or local file.")
+            logger.warning("No SOPs found.")
             return {"articles_fetched": 0, "chunks_upserted": 0}
 
         all_chunks = []
         for article in articles:
             chunks = preprocess_sop_article(article)
-            # Add category metadata to SOPs
             for chunk in chunks:
                 chunk["metadata"]["category"] = "general"
                 chunk["metadata"]["tags"] = ""
@@ -88,10 +76,7 @@ class RAGPipeline:
         return {"articles_fetched": len(articles), "chunks_upserted": upserted}
 
     async def ingest_tickets(self, limit: int = 500) -> dict:
-        """
-        Fetch closed tickets from Zendesk.
-        Extract summaries, embed and store in Pinecone with type=TICKET.
-        """
+        """Fetch closed tickets, extract summaries, embed and store."""
         tickets = await self.zendesk_client.fetch_closed_tickets(limit=limit)
         logger.info(f"Processing {len(tickets)} resolved tickets...")
 
@@ -124,7 +109,7 @@ class RAGPipeline:
         return {"tickets_fetched": len(tickets), "chunks_upserted": upserted}
 
     # ─────────────────────────────────────────────────────────────────────────
-    # CLOSED TICKET SUMMARISATION (NEW — self-learning loop)
+    # CLOSED TICKET SUMMARISATION — self-learning loop
     # ─────────────────────────────────────────────────────────────────────────
 
     async def summarise_and_store_closed_ticket(
@@ -134,35 +119,39 @@ class RAGPipeline:
         description: str,
     ) -> dict:
         """
-        Called when a ticket is marked as solved in Zendesk.
+        Called when a ticket is marked as solved.
+        Generates a structured summary and stores it in Pinecone.
 
-        Workflow:
-        1. Fetch all comments from the ticket
-        2. Send to LLM to generate structured summary
-        3. Embed the summary
-        4. Store in Pinecone with rich metadata (type=TICKET)
-
-        This makes the bot smarter — next time a similar ticket
-        arrives, this summary is retrieved as reference.
+        DUPLICATE PREVENTION:
+        Vector ID is always "ticket_summary_{ticket_id}" — Pinecone upsert
+        overwrites existing vectors with the same ID, so re-processing the
+        same ticket simply updates it rather than creating duplicates.
         """
         logger.info(f"Summarising closed ticket {ticket_id}...")
 
-        # Step 1: Fetch full ticket conversation
+        # Check if already stored — log it but continue (upsert will overwrite)
+        vector_id = f"ticket_summary_{ticket_id}"
+        existing = self.vector_store.fetch_by_id(vector_id)
+        if existing:
+            logger.info(
+                f"Ticket {ticket_id} already in Pinecone — will overwrite with latest summary."
+            )
+
+        # Fetch full conversation
         try:
             comments = await self.zendesk_client.get_ticket_comments(int(ticket_id))
         except Exception as e:
             logger.warning(f"Could not fetch comments for ticket {ticket_id}: {e}")
             comments = []
 
-        # Step 2: Generate structured summary via LLM
+        # Generate structured summary
         summary_data = await self.llm.summarise_ticket(
             subject=subject,
             description=description,
             comments=comments,
         )
 
-        # Step 3: Build the text to embed
-        # We embed the full summary so semantic search can find it
+        # Build text to embed
         embed_text = (
             f"Issue: {subject}\n"
             f"Problem: {summary_data['problem']}\n"
@@ -171,12 +160,12 @@ class RAGPipeline:
             f"Tags: {summary_data['tags']}"
         )
 
-        # Step 4: Embed
+        # Embed
         embedding = self.embedder.embed(embed_text)
 
-        # Step 5: Build chunk with rich metadata
+        # Build chunk with DETERMINISTIC ID — prevents duplicates
         chunk = {
-            "id": f"ticket_summary_{ticket_id}",
+            "id": vector_id,  # same ticket always gets same ID → overwrites
             "text": embed_text,
             "embedding": embedding,
             "metadata": {
@@ -190,19 +179,26 @@ class RAGPipeline:
             },
         }
 
-        # Step 6: Store in Pinecone
+        # Upsert — overwrites if already exists
         success = self.vector_store.upsert_ticket_summary(chunk)
 
         result = {
             "ticket_id": ticket_id,
+            "vector_id": vector_id,
             "category": summary_data["category"],
             "tags": summary_data["tags"],
             "problem": summary_data["problem"],
+            "actions": summary_data["actions"],
             "resolution": summary_data["resolution"],
             "stored_in_pinecone": success,
+            "was_duplicate": existing is not None,
         }
 
-        logger.info(f"Ticket {ticket_id} summarised and stored. Category: {summary_data['category']}")
+        logger.info(
+            f"Ticket {ticket_id} summarised and stored. "
+            f"Category: {summary_data['category']}, "
+            f"Was duplicate: {existing is not None}"
+        )
         return result
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -216,49 +212,43 @@ class RAGPipeline:
     ) -> dict:
         """
         Full RAG query flow:
-        1. Classify ticket category (so we filter relevant past tickets)
-        2. Embed the ticket description
-        3. Query Pinecone: all SOPs + category-filtered past tickets
-        4. Generate LLM response
-        5. Return structured result
+        1. Classify ticket category
+        2. Embed the description
+        3. Query Pinecone: SOPs + category-filtered past tickets
+        4. Fallback to unfiltered if no category hits
+        5. Generate LLM response
         """
         logger.info(f"Generating response for ticket {ticket_id or 'ad-hoc'}...")
 
-        # Step 1: Classify ticket (runs in parallel with embedding)
+        # Classify and embed in parallel
         category_task = asyncio.create_task(
             self.llm.classify_ticket(ticket_description)
         )
-
-        # Step 2: Embed query
         query_embedding = self.embedder.embed(ticket_description)
-
-        # Wait for category
         category = await category_task
         logger.info(f"Ticket classified as: {category}")
 
-        # Step 3: Query Pinecone
-        # SOPs: no category filter (all SOPs are relevant to check)
-        # Tickets: filtered by category for more precise matches
+        # Query Pinecone
         sop_hits, ticket_hits = await asyncio.gather(
             asyncio.to_thread(
                 self.vector_store.query,
                 query_embedding,
-                "SOP",       # filter_type
-                None,        # filter_category — search all SOPs
+                "SOP",
+                None,
                 settings.TOP_K_RESULTS,
             ),
             asyncio.to_thread(
                 self.vector_store.query,
                 query_embedding,
-                "TICKET",    # filter_type
-                category,    # filter_category — only same-category tickets
+                "TICKET",
+                category,
                 settings.TOP_K_RESULTS,
             ),
         )
 
-        # Fallback: if category filter returns nothing, search all tickets
+        # Fallback: no category hits → search all tickets
         if not ticket_hits:
-            logger.info("No category-filtered ticket hits, falling back to all tickets...")
+            logger.info("No category-filtered hits, falling back to all tickets...")
             ticket_hits = await asyncio.to_thread(
                 self.vector_store.query,
                 query_embedding,
@@ -267,20 +257,30 @@ class RAGPipeline:
                 settings.TOP_K_RESULTS,
             )
 
-        logger.info(f"Retrieved {len(sop_hits)} SOP chunks, {len(ticket_hits)} ticket chunks.")
+        logger.info(
+            f"Retrieved {len(sop_hits)} SOP chunks, "
+            f"{len(ticket_hits)} ticket chunks."
+        )
 
-        # Step 4: Generate response
+        # Generate response
         response_text, confidence = await self.llm.generate(
             ticket_description=ticket_description,
             sop_chunks=sop_hits,
             ticket_chunks=ticket_hits,
         )
 
-        # Step 5: Return structured response
         return RAGResponse(
             ticket_id=ticket_id,
             response=response_text,
-            retrieved_sops=[RetrievedChunk(**{k: v for k, v in h.items() if k in RetrievedChunk.model_fields}) for h in sop_hits],
-            retrieved_tickets=[RetrievedChunk(**{k: v for k, v in h.items() if k in RetrievedChunk.model_fields}) for h in ticket_hits],
+            retrieved_sops=[
+                RetrievedChunk(**{k: v for k, v in h.items()
+                                  if k in RetrievedChunk.model_fields})
+                for h in sop_hits
+            ],
+            retrieved_tickets=[
+                RetrievedChunk(**{k: v for k, v in h.items()
+                                  if k in RetrievedChunk.model_fields})
+                for h in ticket_hits
+            ],
             confidence=confidence,
         ).model_dump()

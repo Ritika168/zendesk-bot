@@ -1,5 +1,6 @@
 """
-Zendesk RAG Bot v2.0 — Main FastAPI Application
+Zendesk RAG Bot v2.1 — Main FastAPI Application
+Fixes: richer closed ticket note with actions shown
 """
 
 import logging
@@ -12,7 +13,6 @@ from app.config import settings
 from app.models import (
     TicketWebhookPayload,
     ClosedTicketWebhookPayload,
-    IngestRequest,
     QueryRequest,
 )
 from app.rag_pipeline import RAGPipeline
@@ -36,7 +36,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Zendesk RAG Bot",
     description="Self-improving RAG chatbot using SOPs + resolved ticket summaries.",
-    version="2.0.0",
+    version="2.1.0",
     lifespan=lifespan,
 )
 
@@ -45,7 +45,7 @@ app = FastAPI(
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "version": "2.0.0"}
+    return {"status": "ok", "version": "2.1.0"}
 
 
 # ── Ingestion ─────────────────────────────────────────────────────────────────
@@ -96,27 +96,27 @@ async def query(req: QueryRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ── Webhook: New ticket created ───────────────────────────────────────────────
+# ── Webhook: New ticket ───────────────────────────────────────────────────────
 
 @app.post("/webhook/zendesk")
 async def zendesk_webhook(request: Request):
     """
-    Receives NEW ticket from Zendesk.
-    Generates a suggested response and posts it as an internal note.
+    Receives NEW ticket from Zendesk trigger.
+    Generates a suggested response and posts as internal note.
 
-    Zendesk trigger body should be:
+    Trigger body:
     {
       "ticket_id": "{{ticket.id}}",
       "ticket_description": "Subject: {{ticket.title}}\n\nDescription: {{ticket.description}}"
     }
     """
     raw_body = await request.body()
-    logger.info(f"New ticket webhook received: {raw_body.decode()[:300]}")
+    logger.info(f"New ticket webhook: {raw_body.decode()[:300]}")
 
     try:
         payload = TicketWebhookPayload.model_validate_json(raw_body)
     except Exception as e:
-        logger.error(f"Payload parse error: {e}")
+        logger.error(f"Parse error: {e}")
         raise HTTPException(status_code=422, detail=f"Invalid payload: {e}")
 
     try:
@@ -124,8 +124,7 @@ async def zendesk_webhook(request: Request):
             ticket_description=payload.ticket_description,
             ticket_id=payload.ticket_id,
         )
-
-        logger.info(f"Response generated for ticket {payload.ticket_id}. Confidence: {result['confidence']}")
+        logger.info(f"Response generated. Confidence: {result['confidence']}")
 
         if settings.AUTO_POST_TO_ZENDESK:
             note = _format_new_ticket_note(result)
@@ -133,35 +132,27 @@ async def zendesk_webhook(request: Request):
                 ticket_id=payload.ticket_id_int,
                 note=note,
             )
-            logger.info(f"Posted internal note to ticket {payload.ticket_id}")
 
-        return {
-            "status": "processed",
-            "ticket_id": payload.ticket_id,
-            "confidence": result["confidence"],
-        }
+        return {"status": "processed", "ticket_id": payload.ticket_id, "confidence": result["confidence"]}
 
     except Exception as e:
-        logger.exception(f"Webhook processing failed for ticket {payload.ticket_id}")
+        logger.exception(f"Webhook failed for ticket {payload.ticket_id}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ── Webhook: Ticket closed — self-learning loop ───────────────────────────────
+# ── Webhook: Ticket closed ────────────────────────────────────────────────────
 
 @app.post("/webhook/ticket-closed")
 async def ticket_closed_webhook(request: Request):
     """
-    Receives SOLVED ticket from Zendesk.
+    Receives SOLVED ticket from Zendesk trigger.
+    Summarises, categorises, and stores in Pinecone.
+    Posts a summary note on the ticket.
 
-    Automatically:
-    1. Fetches full conversation from Zendesk
-    2. Generates structured summary: problem + actions + resolution + category + tags
-    3. Stores the summary in Pinecone (type=TICKET)
-    4. Posts a summary note on the ticket so agents can see what was stored
+    DUPLICATE PREVENTION: Same ticket ID always maps to same vector ID.
+    Pinecone upsert overwrites → no duplicates ever created.
 
-    This is the self-learning loop — every closed ticket improves future responses.
-
-    Zendesk trigger body:
+    Trigger body:
     {
       "ticket_id": "{{ticket.id}}",
       "event": "closed",
@@ -170,12 +161,12 @@ async def ticket_closed_webhook(request: Request):
     }
     """
     raw_body = await request.body()
-    logger.info(f"Closed ticket webhook received: {raw_body.decode()[:300]}")
+    logger.info(f"Closed ticket webhook: {raw_body.decode()[:300]}")
 
     try:
         payload = ClosedTicketWebhookPayload.model_validate_json(raw_body)
     except Exception as e:
-        logger.error(f"Closed ticket payload parse error: {e}")
+        logger.error(f"Parse error: {e}")
         raise HTTPException(status_code=422, detail=f"Invalid payload: {e}")
 
     try:
@@ -186,19 +177,18 @@ async def ticket_closed_webhook(request: Request):
         )
 
         logger.info(
-            f"Ticket {payload.ticket_id} summarised. "
+            f"Ticket {payload.ticket_id} stored. "
             f"Category: {result['category']}, "
-            f"Stored in Pinecone: {result['stored_in_pinecone']}"
+            f"Duplicate: {result['was_duplicate']}"
         )
 
-        # Post a summary note on the ticket so agents can see what was stored
         if settings.AUTO_POST_TO_ZENDESK:
             note = _format_closed_ticket_note(result)
             await rag.zendesk_client.post_internal_note(
                 ticket_id=payload.ticket_id_int,
                 note=note,
             )
-            logger.info(f"Posted summary note to closed ticket {payload.ticket_id}")
+            logger.info(f"Posted summary note to ticket {payload.ticket_id}")
 
         return {
             "status": "summary_stored",
@@ -208,20 +198,17 @@ async def ticket_closed_webhook(request: Request):
             "problem": result["problem"],
             "resolution": result["resolution"],
             "stored_in_pinecone": result["stored_in_pinecone"],
+            "was_duplicate": result["was_duplicate"],
         }
 
     except Exception as e:
-        logger.exception(f"Closed ticket processing failed for ticket {payload.ticket_id}")
+        logger.exception(f"Closed ticket failed for {payload.ticket_id}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 # ── Note formatters ───────────────────────────────────────────────────────────
 
 def _format_new_ticket_note(result: dict) -> str:
-    """
-    Format the RAG response as a clear internal note for agents.
-    Shows: confidence, suggested reply, and which SOPs/tickets were used.
-    """
     confidence = result.get("confidence", "MEDIUM")
     response = result.get("response", "")
     retrieved_sops = result.get("retrieved_sops", [])
@@ -233,53 +220,59 @@ def _format_new_ticket_note(result: dict) -> str:
         "MANUAL_REVIEW": "🔴 MANUAL REVIEW REQUIRED — no matching SOP found",
     }.get(confidence, "⚠️  Review before sending")
 
-    # List which SOPs were used
     sop_lines = ""
     if retrieved_sops:
-        sop_lines = "\n📋 SOPs used:\n"
+        sop_lines = "\n\n📋 SOPs used:\n"
         for s in retrieved_sops:
             sop_lines += f"  • {s['title']} (score: {s['score']})\n"
 
-    # List which past ticket summaries were used
     ticket_lines = ""
     if retrieved_tickets:
         ticket_lines = "\n🎫 Similar past tickets used:\n"
         for t in retrieved_tickets:
             ticket_lines += f"  • {t['title']} (score: {t['score']})\n"
+    else:
+        ticket_lines = "\n🎫 Similar past tickets: None yet (will improve over time)"
 
-    return f"""🤖 RAG Bot Suggestion
-{confidence_line}
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-{response}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📚 Knowledge sources:{sop_lines}{ticket_lines if ticket_lines else chr(10) + '  No similar past tickets found yet.'}"""
+    return (
+        f"🤖 RAG Bot Suggestion\n"
+        f"{confidence_line}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"{response}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📚 Knowledge sources:{sop_lines}{ticket_lines}"
+    )
 
 
 def _format_closed_ticket_note(result: dict) -> str:
-    """
-    Format the ticket summary as an internal note on the closed ticket.
-    This shows agents exactly what was stored in Pinecone for future use.
-    """
-    stored = "✅ Yes — will be used for future similar tickets" if result.get("stored_in_pinecone") else "❌ Storage failed"
+    stored = (
+        "✅ Stored — will be used for future similar tickets"
+        if result.get("stored_in_pinecone")
+        else "❌ Storage failed"
+    )
+    duplicate_note = (
+        "\n⚠️  Note: This ticket was already in the knowledge base — updated with latest summary."
+        if result.get("was_duplicate")
+        else ""
+    )
 
-    return f"""📦 RAG Bot — Ticket Summary Stored
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-This ticket has been summarised and added to the knowledge base.
+    actions = result.get("actions", "Not recorded")
+    # Format bullet points nicely
+    if actions and not actions.startswith("-"):
+        actions = "- " + actions
 
-🔍 PROBLEM:
-{result.get('problem', 'N/A')}
-
-✅ RESOLUTION:
-{result.get('resolution', 'N/A')}
-
-🏷️  CATEGORY: {result.get('category', 'other').upper()}
-🔖 TAGS: {result.get('tags', 'N/A')}
-
-💾 Stored in Pinecone: {stored}
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Future tickets similar to this one will automatically use this summary as reference."""
+    return (
+        f"📦 RAG Bot — Ticket Knowledge Stored\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🔍 PROBLEM:\n{result.get('problem', 'N/A')}\n\n"
+        f"🛠️  ACTIONS TAKEN:\n{actions}\n\n"
+        f"✅ RESOLUTION:\n{result.get('resolution', 'N/A')}\n\n"
+        f"🏷️  CATEGORY: {result.get('category', 'other').upper()}\n"
+        f"🔖 TAGS: {result.get('tags', 'N/A')}\n\n"
+        f"💾 Pinecone: {stored}{duplicate_note}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"Future tickets similar to this will use this summary as reference."
+    )
 
 
 # ── Global error handler ──────────────────────────────────────────────────────

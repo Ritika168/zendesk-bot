@@ -1,21 +1,9 @@
 """
-Pinecone vector store — upsert and query operations.
+Pinecone vector store — upsert, query, and fetch operations.
 
-Index schema
-────────────
-Dimension : 384  (all-MiniLM-L6-v2 via HuggingFace)
-Metric    : cosine
-Spec      : serverless, aws us-east-1 (free tier)
-
-Metadata fields stored per vector
-──────────────────────────────────
-  type       : "SOP" | "TICKET"
-  source_id  : original Zendesk article/ticket ID
-  title      : human-readable title
-  category   : billing | authentication | technical | account | refund | other
-  tags       : comma-separated keywords
-  chunk_index: position within source document
-  text       : raw chunk text (stored for retrieval)
+Duplicate prevention strategy:
+- SOPs: id = "sop_{article_id}_chunk_{n}" — re-ingesting same SOP overwrites
+- Tickets: id = "ticket_summary_{ticket_id}" — one vector per ticket, always overwrites
 """
 
 import logging
@@ -51,8 +39,8 @@ class VectorStore:
 
     def upsert_chunks(self, chunks: list[dict]) -> int:
         """
-        Upsert chunks into Pinecone.
-        Each chunk must have: id, embedding, text, metadata (dict).
+        Upsert a list of chunks into Pinecone.
+        Pinecone upsert is idempotent — same ID = overwrite, no duplicate.
         """
         if not chunks:
             return 0
@@ -64,10 +52,7 @@ class VectorStore:
                 {
                     "id": c["id"],
                     "values": c["embedding"],
-                    "metadata": {
-                        **c["metadata"],
-                        "text": c["text"],
-                    },
+                    "metadata": {**c["metadata"], "text": c["text"]},
                 }
                 for c in batch
             ]
@@ -79,26 +64,42 @@ class VectorStore:
 
     def upsert_ticket_summary(self, chunk: dict) -> bool:
         """
-        Upsert a single ticket summary chunk.
-        Used by the closed-ticket webhook.
-        chunk must have: id, embedding, text, metadata
+        Upsert a single ticket summary.
+        ID format: "ticket_summary_{ticket_id}"
+        Same ticket processed twice → second upsert overwrites the first.
+        No duplicates possible.
         """
         try:
             self._index.upsert(vectors=[
                 {
                     "id": chunk["id"],
                     "values": chunk["embedding"],
-                    "metadata": {
-                        **chunk["metadata"],
-                        "text": chunk["text"],
-                    },
+                    "metadata": {**chunk["metadata"], "text": chunk["text"]},
                 }
             ])
-            logger.info(f"Upserted ticket summary: {chunk['id']}")
+            logger.info(f"Upserted ticket summary vector: {chunk['id']}")
             return True
         except Exception as e:
             logger.error(f"Failed to upsert ticket summary: {e}")
             return False
+
+    # ── Fetch by ID (for duplicate check) ────────────────────────────────────
+
+    def fetch_by_id(self, vector_id: str) -> dict | None:
+        """
+        Fetch a single vector by ID.
+        Returns None if not found.
+        Used to check if a ticket summary already exists before storing.
+        """
+        try:
+            result = self._index.fetch(ids=[vector_id])
+            vectors = result.get("vectors", {})
+            if vector_id in vectors:
+                return vectors[vector_id]
+            return None
+        except Exception as e:
+            logger.warning(f"Fetch by ID failed for {vector_id}: {e}")
+            return None
 
     # ── Query ─────────────────────────────────────────────────────────────────
 
@@ -111,11 +112,10 @@ class VectorStore:
     ) -> list[dict]:
         """
         Query Pinecone for nearest neighbours.
-        Optionally filter by:
+        Optional filters:
           - filter_type: "SOP" or "TICKET"
           - filter_category: "billing", "authentication", etc.
         """
-        # Build filter
         filter_dict = {}
         if filter_type:
             filter_dict["type"] = {"$eq": filter_type}

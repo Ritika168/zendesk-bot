@@ -1,6 +1,7 @@
 """
-Zendesk RAG Bot v2.1 — Main FastAPI Application
-Fixes: richer closed ticket note with actions shown
+Zendesk RAG Bot v2.2
+KEY FIX: Single smart webhook endpoint that handles BOTH new and closed tickets.
+Detects payload type automatically — no need for separate webhook URLs.
 """
 
 import logging
@@ -10,11 +11,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from app.config import settings
-from app.models import (
-    TicketWebhookPayload,
-    ClosedTicketWebhookPayload,
-    QueryRequest,
-)
+from app.models import QueryRequest
 from app.rag_pipeline import RAGPipeline
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -36,7 +33,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Zendesk RAG Bot",
     description="Self-improving RAG chatbot using SOPs + resolved ticket summaries.",
-    version="2.1.0",
+    version="2.2.0",
     lifespan=lifespan,
 )
 
@@ -45,7 +42,7 @@ app = FastAPI(
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "version": "2.1.0"}
+    return {"status": "ok", "version": "2.2.0"}
 
 
 # ── Ingestion ─────────────────────────────────────────────────────────────────
@@ -96,63 +93,27 @@ async def query(req: QueryRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ── Webhook: New ticket ───────────────────────────────────────────────────────
+# ── SINGLE SMART WEBHOOK — handles both new and closed tickets ────────────────
 
 @app.post("/webhook/zendesk")
 async def zendesk_webhook(request: Request):
     """
-    Receives NEW ticket from Zendesk trigger.
-    Generates a suggested response and posts as internal note.
+    Single webhook endpoint that handles ALL Zendesk events.
 
-    Trigger body:
+    Detects payload type automatically:
+    - If payload has 'event: closed' → summarise and store ticket
+    - Otherwise → generate response for new ticket
+
+    This means you only need ONE webhook in Zendesk pointing to this URL.
+    Both triggers (new ticket + ticket closed) use the same webhook.
+
+    New ticket trigger body:
     {
       "ticket_id": "{{ticket.id}}",
       "ticket_description": "Subject: {{ticket.title}}\n\nDescription: {{ticket.description}}"
     }
-    """
-    raw_body = await request.body()
-    logger.info(f"New ticket webhook: {raw_body.decode()[:300]}")
 
-    try:
-        payload = TicketWebhookPayload.model_validate_json(raw_body)
-    except Exception as e:
-        logger.error(f"Parse error: {e}")
-        raise HTTPException(status_code=422, detail=f"Invalid payload: {e}")
-
-    try:
-        result = await rag.generate_response(
-            ticket_description=payload.ticket_description,
-            ticket_id=payload.ticket_id,
-        )
-        logger.info(f"Response generated. Confidence: {result['confidence']}")
-
-        if settings.AUTO_POST_TO_ZENDESK:
-            note = _format_new_ticket_note(result)
-            await rag.zendesk_client.post_internal_note(
-                ticket_id=payload.ticket_id_int,
-                note=note,
-            )
-
-        return {"status": "processed", "ticket_id": payload.ticket_id, "confidence": result["confidence"]}
-
-    except Exception as e:
-        logger.exception(f"Webhook failed for ticket {payload.ticket_id}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# ── Webhook: Ticket closed ────────────────────────────────────────────────────
-
-@app.post("/webhook/ticket-closed")
-async def ticket_closed_webhook(request: Request):
-    """
-    Receives SOLVED ticket from Zendesk trigger.
-    Summarises, categorises, and stores in Pinecone.
-    Posts a summary note on the ticket.
-
-    DUPLICATE PREVENTION: Same ticket ID always maps to same vector ID.
-    Pinecone upsert overwrites → no duplicates ever created.
-
-    Trigger body:
+    Closed ticket trigger body:
     {
       "ticket_id": "{{ticket.id}}",
       "event": "closed",
@@ -161,38 +122,133 @@ async def ticket_closed_webhook(request: Request):
     }
     """
     raw_body = await request.body()
+    logger.info(f"Webhook received: {raw_body.decode()[:300]}")
+
+    try:
+        import json
+        data = json.loads(raw_body)
+    except Exception as e:
+        logger.error(f"JSON parse error: {e}")
+        raise HTTPException(status_code=422, detail=f"Invalid JSON: {e}")
+
+    ticket_id = str(data.get("ticket_id", ""))
+    event = data.get("event", "new")
+
+    if not ticket_id:
+        raise HTTPException(status_code=422, detail="Missing ticket_id")
+
+    # ── Route: Closed ticket → summarise and store ────────────────────────────
+    if event == "closed":
+        logger.info(f"Routing ticket {ticket_id} to CLOSED handler")
+        try:
+            result = await rag.summarise_and_store_closed_ticket(
+                ticket_id=ticket_id,
+                subject=data.get("subject", ""),
+                description=data.get("description", ""),
+            )
+
+            logger.info(
+                f"Ticket {ticket_id} summarised. "
+                f"Category: {result['category']}, "
+                f"Stored: {result['stored_in_pinecone']}, "
+                f"Duplicate: {result['was_duplicate']}"
+            )
+
+            if settings.AUTO_POST_TO_ZENDESK:
+                note = _format_closed_ticket_note(result)
+                await rag.zendesk_client.post_internal_note(
+                    ticket_id=int(ticket_id),
+                    note=note,
+                )
+                logger.info(f"Posted summary note to ticket {ticket_id}")
+
+            return {
+                "status": "summary_stored",
+                "ticket_id": ticket_id,
+                "category": result["category"],
+                "tags": result["tags"],
+                "problem": result["problem"],
+                "resolution": result["resolution"],
+                "stored_in_pinecone": result["stored_in_pinecone"],
+                "was_duplicate": result["was_duplicate"],
+            }
+
+        except Exception as e:
+            logger.exception(f"Closed ticket processing failed for {ticket_id}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    # ── Route: New ticket → generate response ─────────────────────────────────
+    else:
+        ticket_description = data.get("ticket_description", "")
+        if not ticket_description:
+            # Fallback: build description from subject + description fields
+            subject = data.get("subject", "")
+            description = data.get("description", "")
+            ticket_description = f"Subject: {subject}\n\nDescription: {description}"
+
+        logger.info(f"Routing ticket {ticket_id} to NEW TICKET handler")
+
+        try:
+            result = await rag.generate_response(
+                ticket_description=ticket_description,
+                ticket_id=ticket_id,
+            )
+            logger.info(f"Response generated. Confidence: {result['confidence']}")
+
+            if settings.AUTO_POST_TO_ZENDESK:
+                note = _format_new_ticket_note(result)
+                await rag.zendesk_client.post_internal_note(
+                    ticket_id=int(ticket_id),
+                    note=note,
+                )
+                logger.info(f"Posted internal note to ticket {ticket_id}")
+
+            return {
+                "status": "processed",
+                "ticket_id": ticket_id,
+                "confidence": result["confidence"],
+            }
+
+        except Exception as e:
+            logger.exception(f"New ticket processing failed for {ticket_id}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Keep the dedicated closed endpoint too (for manual curl testing) ──────────
+
+@app.post("/webhook/ticket-closed")
+async def ticket_closed_webhook(request: Request):
+    """Dedicated endpoint for manual testing of closed ticket flow."""
+    raw_body = await request.body()
     logger.info(f"Closed ticket webhook: {raw_body.decode()[:300]}")
 
     try:
-        payload = ClosedTicketWebhookPayload.model_validate_json(raw_body)
+        import json
+        data = json.loads(raw_body)
     except Exception as e:
-        logger.error(f"Parse error: {e}")
-        raise HTTPException(status_code=422, detail=f"Invalid payload: {e}")
+        raise HTTPException(status_code=422, detail=f"Invalid JSON: {e}")
+
+    ticket_id = str(data.get("ticket_id", ""))
+    if not ticket_id:
+        raise HTTPException(status_code=422, detail="Missing ticket_id")
 
     try:
         result = await rag.summarise_and_store_closed_ticket(
-            ticket_id=payload.ticket_id,
-            subject=payload.subject,
-            description=payload.description,
-        )
-
-        logger.info(
-            f"Ticket {payload.ticket_id} stored. "
-            f"Category: {result['category']}, "
-            f"Duplicate: {result['was_duplicate']}"
+            ticket_id=ticket_id,
+            subject=data.get("subject", ""),
+            description=data.get("description", ""),
         )
 
         if settings.AUTO_POST_TO_ZENDESK:
             note = _format_closed_ticket_note(result)
             await rag.zendesk_client.post_internal_note(
-                ticket_id=payload.ticket_id_int,
+                ticket_id=int(ticket_id),
                 note=note,
             )
-            logger.info(f"Posted summary note to ticket {payload.ticket_id}")
 
         return {
             "status": "summary_stored",
-            "ticket_id": payload.ticket_id,
+            "ticket_id": ticket_id,
             "category": result["category"],
             "tags": result["tags"],
             "problem": result["problem"],
@@ -202,7 +258,7 @@ async def ticket_closed_webhook(request: Request):
         }
 
     except Exception as e:
-        logger.exception(f"Closed ticket failed for {payload.ticket_id}")
+        logger.exception(f"Closed ticket failed for {ticket_id}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -226,13 +282,11 @@ def _format_new_ticket_note(result: dict) -> str:
         for s in retrieved_sops:
             sop_lines += f"  • {s['title']} (score: {s['score']})\n"
 
-    ticket_lines = ""
+    ticket_lines = "\n🎫 Similar past tickets: None yet"
     if retrieved_tickets:
         ticket_lines = "\n🎫 Similar past tickets used:\n"
         for t in retrieved_tickets:
             ticket_lines += f"  • {t['title']} (score: {t['score']})\n"
-    else:
-        ticket_lines = "\n🎫 Similar past tickets: None yet (will improve over time)"
 
     return (
         f"🤖 RAG Bot Suggestion\n"
@@ -251,27 +305,28 @@ def _format_closed_ticket_note(result: dict) -> str:
         else "❌ Storage failed"
     )
     duplicate_note = (
-        "\n⚠️  Note: This ticket was already in the knowledge base — updated with latest summary."
+        "\n⚠️  Already existed — updated with latest summary."
         if result.get("was_duplicate")
-        else ""
+        else "\n🆕 New entry added to knowledge base."
     )
 
     actions = result.get("actions", "Not recorded")
-    # Format bullet points nicely
-    if actions and not actions.startswith("-"):
-        actions = "- " + actions
+    if actions and not actions.strip().startswith("-"):
+        actions_formatted = "- " + actions
+    else:
+        actions_formatted = actions
 
     return (
         f"📦 RAG Bot — Ticket Knowledge Stored\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"🔍 PROBLEM:\n{result.get('problem', 'N/A')}\n\n"
-        f"🛠️  ACTIONS TAKEN:\n{actions}\n\n"
+        f"🛠️  ACTIONS TAKEN:\n{actions_formatted}\n\n"
         f"✅ RESOLUTION:\n{result.get('resolution', 'N/A')}\n\n"
         f"🏷️  CATEGORY: {result.get('category', 'other').upper()}\n"
         f"🔖 TAGS: {result.get('tags', 'N/A')}\n\n"
         f"💾 Pinecone: {stored}{duplicate_note}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"Future tickets similar to this will use this summary as reference."
+        f"Future similar tickets will use this as reference."
     )
 
 
